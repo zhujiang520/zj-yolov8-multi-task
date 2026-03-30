@@ -172,8 +172,12 @@ class BasePredictor:
                         plot_args['im_gpu'] = im[idx]
                         plotted_img.append(result.plot(**plot_args))
             else:
-                plotted_img.append(results)
-        self.plotted_img=plotted_img
+                # Segmentation tensor is (B, H, W) or (H, W); align with detection branch per ``idx``.
+                r = results
+                if isinstance(r, torch.Tensor) and r.dim() == 3:
+                    r = r[idx]
+                plotted_img.append(r)
+        self.plotted_img = plotted_img
 
         # Write
         # if self.args.save_txt:
@@ -254,8 +258,13 @@ class BasePredictor:
             # Postprocess
             with profilers[2]:
                 if self.args.task == 'multi':
+                    # Drop extra Detect/Segment heads (e.g. 3 outputs, 2 supervised tasks) — untrained heads
+                    # produce random argmax patterns that look like stippled noise on the saved image.
+                    _fn = getattr(self, '_n_multi_tasks_for_predict', None)
+                    n_keep = _fn() if callable(_fn) else None
+                    preds_use = preds if n_keep is None else preds[:n_keep]
                     self.results = []
-                    for i, pred in enumerate(preds):
+                    for i, pred in enumerate(preds_use):
                         if isinstance(pred, tuple):
                             pred = self.postprocess_det(pred, im, im0s)
                             self.results.append(pred)
@@ -344,23 +353,33 @@ class BasePredictor:
         if self.dataset.mode == 'image':
             im0 = im0_list[0].copy()  # We create a copy so that we don't modify the original image
 
-            # Convert tensor to ndarray and remove the first dimension
-            mask1 = im0_list[1][0].to(torch.uint8).cpu().numpy()
-            mask2 = im0_list[2][0].to(torch.uint8).cpu().numpy()
+            def _mask_to_hw_u8(m, h, w):
+                if isinstance(m, torch.Tensor):
+                    m = m.to(torch.uint8).cpu().numpy()
+                else:
+                    m = np.asarray(m)
+                if m.ndim != 2:
+                    m = np.squeeze(m)
+                if m.shape[0] != h or m.shape[1] != w:
+                    m = cv2.resize(m.astype(np.float32), (w, h), interpolation=cv2.INTER_NEAREST)
+                    m = m.astype(np.uint8)
+                return m
 
-            # Convert mask to RGB
-            color_mask1 = np.stack([mask1 * 0, mask1 * 255, mask1 * 0], axis=-1)
-            color_mask2 = np.stack([mask2 * 255, mask2 * 0, mask2 * 0], axis=-1)
+            h0, w0 = im0.shape[:2]
+            colors_bgr = ((0, 255, 0), (0, 0, 255), (255, 0, 0), (0, 255, 255), (255, 0, 255), (255, 255, 0))
+            alpha = 0.5
 
-            alpha = 0.5  # transparency factor
-
-            # Overlay masks on im0 with transparency
-            im0[np.any(color_mask1 != [0, 0, 0], axis=-1)] = (1 - alpha) * im0[
-                np.any(color_mask1 != [0, 0, 0], axis=-1)] + alpha * color_mask1[
-                                                                 np.any(color_mask1 != [0, 0, 0], axis=-1)]
-            im0[np.any(color_mask2 != [0, 0, 0], axis=-1)] = (1 - alpha) * im0[
-                np.any(color_mask2 != [0, 0, 0], axis=-1)] + alpha * color_mask2[
-                                                                 np.any(color_mask2 != [0, 0, 0], axis=-1)]
+            for mi in range(1, len(im0_list)):
+                mask = _mask_to_hw_u8(im0_list[mi], h0, w0)
+                fg = mask.astype(np.int32) > 0
+                if not fg.any():
+                    continue
+                b, g, r = colors_bgr[(mi - 1) % len(colors_bgr)]
+                blend = im0[fg].astype(np.float32)
+                blend[:, 0] = (1 - alpha) * blend[:, 0] + alpha * b
+                blend[:, 1] = (1 - alpha) * blend[:, 1] + alpha * g
+                blend[:, 2] = (1 - alpha) * blend[:, 2] + alpha * r
+                im0[fg] = blend.astype(im0.dtype)
 
             # Save the final image
             cv2.imwrite(save_path, im0)

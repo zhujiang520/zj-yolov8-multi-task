@@ -4,10 +4,27 @@ import torch
 
 from ultralytics.yolo.engine.predictor_multi import BasePredictor
 from ultralytics.yolo.engine.results import Results
-from ultralytics.yolo.utils import DEFAULT_CFG, ROOT, ops
+from ultralytics.yolo.utils import DEFAULT_CFG, ROOT, ops, yaml_load
+from ultralytics.yolo.utils.checks import check_file
 
 
 class MultiPredictor(BasePredictor):
+    """Predictor that only keeps the first ``len(labels_list)`` heads (same order as training)."""
+
+    def _n_multi_tasks_for_predict(self):
+        """How many heads to run through postprocess/visualize; extra heads are untrained noise."""
+        d = self.args.data
+        if not d:
+            return None
+        if isinstance(d, dict) and 'labels_list' in d:
+            return len(d['labels_list'])
+        try:
+            data = yaml_load(check_file(d))
+            if isinstance(data, dict) and 'labels_list' in data:
+                return len(data['labels_list'])
+        except Exception:
+            pass
+        return None
 
     def postprocess_det(self, preds, img, orig_imgs):
         """Postprocesses predictions and returns a list of Results objects."""
